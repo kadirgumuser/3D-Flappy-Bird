@@ -1,0 +1,721 @@
+<!DOCTYPE html>
+<html lang="tr">
+
+<head>
+    <meta charset="UTF-8">
+    <title>3D Flappy - Platform Optimize</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: #87CEEB;
+            font-family: sans-serif;
+        }
+
+        #game-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+        }
+
+        #control-layer {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            width: 320px;
+            height: 240px;
+            z-index: 10;
+            border: 3px solid rgba(255, 255, 255, 0.5);
+            border-radius: 15px;
+            overflow: hidden;
+            background: rgba(0, 0, 0, 0.8);
+            box-shadow: 0 0 15px rgba(0, 0, 0, 0.5);
+        }
+
+        #output_canvas {
+            width: 100%;
+            height: 100%;
+            transform: scaleX(-1);
+        }
+
+        #webcam {
+            display: none;
+        }
+
+        #info {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: white;
+            z-index: 20;
+            background: rgba(0, 0, 0, 0.6);
+            padding: 20px;
+            border-radius: 12px;
+            font-size: 18px;
+            pointer-events: none;
+            border-left: 5px solid #00FFFF;
+        }
+
+        #gameOverScreen {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            text-align: center;
+            display: none;
+            z-index: 30;
+            background: rgba(0, 0, 0, 0.9);
+            padding: 50px;
+            border-radius: 25px;
+            border: 3px solid #e74c3c;
+            box-shadow: 0 0 50px rgba(231, 76, 60, 0.5);
+        }
+
+        button {
+            padding: 15px 40px;
+            font-size: 24px;
+            cursor: pointer;
+            border-radius: 10px;
+            border: none;
+            background: #e74c3c;
+            color: white;
+            font-weight: bold;
+            margin-top: 20px;
+        }
+
+        .highlight {
+            color: #00FFFF;
+            font-weight: bold;
+        }
+
+        #fps {
+            position: absolute;
+            top: 20px;
+            right: 360px;
+            color: white;
+            background: rgba(0, 0, 0, 0.6);
+            padding: 10px;
+            border-radius: 8px;
+            font-size: 14px;
+            z-index: 20;
+        }
+    </style>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js"
+        crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"
+        crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+
+<body>
+
+    <div id="info">
+        <h2 style="margin-top:0">🎮 3D FLAPPY BIRD</h2>
+        <p>Klasik Flappy Bird mekaniği!</p>
+        <p>1. <span class="highlight">YÖN:</span> İmleci Sağa/Sola götür.</p>
+        <p>2. <span class="highlight">ZIPLA:</span> Pinch (Çimdik) yap!</p>
+        <p style="margin-top:10px; font-size:14px; opacity:0.8;">💡 Tıkla → Zıpla → Düş → Tekrar Tıkla</p>
+        <p style="margin-top:15px; font-size:24px">Skor: <span id="scoreVal" class="highlight">0</span></p>
+    </div>
+
+    <div id="fps">FPS: <span id="fpsVal">60</span></div>
+
+    <div id="gameOverScreen">
+        <h1 style="font-size: 60px; margin: 0; color: #e74c3c;">KAZA!</h1>
+        <p style="font-size: 30px;">Skorun: <span id="finalScore">0</span></p>
+        <button onclick="resetGame()">TEKRAR DENE</button>
+    </div>
+
+    <div id="control-layer">
+        <canvas id="output_canvas" width="320" height="240"></canvas>
+    </div>
+    <video id="webcam" playsinline></video>
+
+    <div id="game-container"></div>
+
+    <script>
+        // --- DELTA TIME TABANLI AYARLAR ---
+        const CAMERA_WIDTH = 320;
+        const CAMERA_HEIGHT = 240;
+
+        // Oyun Değişkenleri
+        let camera, scene, renderer;
+        let bird, pipes = [];
+        let roadSegments = [];
+        let gameActive = false;
+        let score = 0;
+        let birdVelocityY = 0;
+        let targetBirdX = 0;
+        let lastPipeZ = -20;
+        let lastRoadZ = 0;
+
+        // DELTA TIME için
+        let lastTime = performance.now();
+        let deltaTime = 0;
+        const TARGET_FPS = 60;
+        const FIXED_TIME_STEP = 1000 / TARGET_FPS; // 16.67ms
+
+        // FPS Counter
+        let frameCount = 0;
+        let fpsTime = 0;
+        let currentFPS = 60;
+
+        // Fizik sabitleri (saniyede birim olarak) - FLAPPY BIRD TARZI
+        const GRAVITY = 18.5; // birim/saniye² - Daha hızlı düşüş
+        const JUMP_STRENGTH = 12.0; // birim/saniye - Net zıplama
+        const GAME_SPEED = 6.0; // birim/saniye
+        const MAX_FALL_SPEED = -10.0; // Maksimum düşüş hızı sınırı
+        const PIPE_DISTANCE = 22;
+
+        // Harita Sınırları
+        const ROAD_WIDTH = 28;
+        const PLAY_WIDTH = 10.0;
+        const WALL_HEIGHT = 15;
+        const PIPE_WIDTH = 2.5;
+        const PIPE_GAP_Y = 6;
+
+        // El Takibi - FLAPPY BIRD TARZI
+        let isPinching = false;
+        let lastPinchTime = 0;
+        const PINCH_COOLDOWN = 200; // Orta seviye cooldown
+        const PINCH_THRESHOLD = 0.055; // Çimdik hassasiyeti
+
+        // Yumuşatma için
+        let currentBirdOffset = 0;
+        let cameraCurrentOffset = 0;
+
+        init3D();
+        setupMediaPipe();
+        animate();
+
+        function init3D() {
+            const container = document.getElementById('game-container');
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87CEEB);
+            scene.fog = new THREE.FogExp2(0x87CEEB, 0.012);
+
+            camera = new THREE.PerspectiveCamera(80, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 4, 15);
+            camera.lookAt(0, 0, -10);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            container.appendChild(renderer.domElement);
+
+            const ambientLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.6);
+            scene.add(ambientLight);
+
+            const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            dirLight.position.set(50, 80, 30);
+            dirLight.castShadow = true;
+            dirLight.shadow.mapSize.width = 2048;
+            dirLight.shadow.mapSize.height = 2048;
+            dirLight.shadow.camera.near = 0.1;
+            dirLight.shadow.camera.far = 500;
+            dirLight.shadow.camera.left = -100;
+            dirLight.shadow.camera.right = 100;
+            dirLight.shadow.camera.top = 100;
+            dirLight.shadow.camera.bottom = -100;
+            scene.add(dirLight);
+
+            for (let i = 0; i < 50; i++) {
+                createRoadSegment();
+            }
+
+            bird = new THREE.Group();
+            const body = new THREE.Mesh(
+                new THREE.SphereGeometry(0.7, 16, 16),
+                new THREE.MeshStandardMaterial({ color: 0xf1c40f, roughness: 0.4 })
+            );
+            body.castShadow = true;
+            bird.add(body);
+
+            const wing = new THREE.Mesh(
+                new THREE.BoxGeometry(2.2, 0.1, 0.8),
+                new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.4 })
+            );
+            wing.castShadow = true;
+            bird.add(wing);
+
+            const eyeGeo = new THREE.SphereGeometry(0.15, 8, 8);
+            const eyeMat = new THREE.MeshBasicMaterial({ color: 0x000000 });
+            const eyeL = new THREE.Mesh(eyeGeo, eyeMat);
+            eyeL.position.set(-0.25, 0.3, 0.5);
+            const eyeR = new THREE.Mesh(eyeGeo, eyeMat);
+            eyeR.position.set(0.25, 0.3, 0.5);
+            bird.add(eyeL);
+            bird.add(eyeR);
+            scene.add(bird);
+
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+        }
+
+        function getRoadX(z) {
+            return Math.sin(z * 0.05) * 15;
+        }
+
+        function createRoadSegment() {
+            const segmentLength = 5;
+            const z = lastRoadZ;
+            const nextZ = z - segmentLength;
+            const x = getRoadX(z);
+            const nextX = getRoadX(nextZ);
+            const halfWidth = ROAD_WIDTH / 2;
+            const y = -3;
+
+            const p1 = new THREE.Vector3(x - halfWidth, y, z);
+            const p2 = new THREE.Vector3(x + halfWidth, y, z);
+            const p3 = new THREE.Vector3(nextX - halfWidth, y, nextZ);
+            const p4 = new THREE.Vector3(nextX + halfWidth, y, nextZ);
+
+            const roadGeo = new THREE.BufferGeometry();
+            const roadVertices = new Float32Array([
+                p1.x, p1.y, p1.z,
+                p2.x, p2.y, p2.z,
+                p3.x, p3.y, p3.z,
+                p2.x, p2.y, p2.z,
+                p4.x, p4.y, p4.z,
+                p3.x, p3.y, p3.z
+            ]);
+            roadGeo.setAttribute('position', new THREE.BufferAttribute(roadVertices, 3));
+            roadGeo.computeVertexNormals();
+
+            const roadMat = new THREE.MeshStandardMaterial({
+                color: 0xFFD700,
+                roughness: 0.8,
+                side: THREE.DoubleSide
+            });
+            const road = new THREE.Mesh(roadGeo, roadMat);
+            road.receiveShadow = true;
+            scene.add(road);
+
+            const wallMat = new THREE.MeshBasicMaterial({
+                color: 0x00FFFF,
+                transparent: true,
+                opacity: 0.15,
+                side: THREE.DoubleSide
+            });
+
+            const leftWallGeo = new THREE.BufferGeometry();
+            const h = WALL_HEIGHT;
+            const lwVertices = new Float32Array([
+                p1.x, p1.y, p1.z,
+                p3.x, p3.y, p3.z,
+                p1.x, p1.y + h, p1.z,
+                p3.x, p3.y, p3.z,
+                p3.x, p3.y + h, p3.z,
+                p1.x, p1.y + h, p1.z
+            ]);
+            leftWallGeo.setAttribute('position', new THREE.BufferAttribute(lwVertices, 3));
+            leftWallGeo.computeVertexNormals();
+            const leftWall = new THREE.Mesh(leftWallGeo, wallMat);
+            scene.add(leftWall);
+
+            const rightWallGeo = new THREE.BufferGeometry();
+            const rwVertices = new Float32Array([
+                p2.x, p2.y, p2.z,
+                p4.x, p4.y, p4.z,
+                p2.x, p2.y + h, p2.z,
+                p4.x, p4.y, p4.z,
+                p4.x, p4.y + h, p4.z,
+                p2.x, p2.y + h, p2.z
+            ]);
+            rightWallGeo.setAttribute('position', new THREE.BufferAttribute(rwVertices, 3));
+            rightWallGeo.computeVertexNormals();
+            const rightWall = new THREE.Mesh(rightWallGeo, wallMat);
+            scene.add(rightWall);
+
+            roadSegments.push({ mesh: road, left: leftWall, right: rightWall, z: z });
+            lastRoadZ = nextZ;
+
+            if (roadSegments.length > 100) {
+                const old = roadSegments.shift();
+                scene.remove(old.mesh);
+                scene.remove(old.left);
+                scene.remove(old.right);
+                old.mesh.geometry.dispose();
+                old.mesh.material.dispose();
+                old.left.geometry.dispose();
+                old.left.material.dispose();
+                old.right.geometry.dispose();
+                old.right.material.dispose();
+            }
+        }
+
+        function createPipe() {
+            const pipeZ = lastPipeZ - PIPE_DISTANCE;
+            const roadX = getRoadX(pipeZ);
+            const limitX = PLAY_WIDTH - 1.5;
+            const randomOffset = (Math.random() * (limitX * 2)) - limitX;
+            const randomX = roadX + randomOffset;
+            const randomY = Math.random() * 5 + 1;
+
+            const pipeMat = new THREE.MeshStandardMaterial({ color: 0x00AA00, roughness: 0.5 });
+
+            const upperGeo = new THREE.CylinderGeometry(PIPE_WIDTH / 2, PIPE_WIDTH / 2, 15, 16);
+            const upperPipe = new THREE.Mesh(upperGeo, pipeMat);
+            upperPipe.position.set(randomX, randomY + PIPE_GAP_Y / 2 + 7.5, pipeZ);
+            upperPipe.castShadow = true;
+            upperPipe.receiveShadow = true;
+
+            const lowerGeo = new THREE.CylinderGeometry(PIPE_WIDTH / 2, PIPE_WIDTH / 2, 15, 16);
+            const lowerPipe = new THREE.Mesh(lowerGeo, pipeMat);
+            lowerPipe.position.set(randomX, randomY - PIPE_GAP_Y / 2 - 7.5, pipeZ);
+            lowerPipe.castShadow = true;
+            lowerPipe.receiveShadow = true;
+
+            const capGeo = new THREE.CylinderGeometry(PIPE_WIDTH / 1.8, PIPE_WIDTH / 1.8, 0.5, 16);
+            const uCap = new THREE.Mesh(capGeo, pipeMat);
+            uCap.position.set(randomX, randomY + PIPE_GAP_Y / 2 + 0.25, pipeZ);
+            uCap.castShadow = true;
+            uCap.receiveShadow = true;
+
+            const lCap = new THREE.Mesh(capGeo, pipeMat);
+            lCap.position.set(randomX, randomY - PIPE_GAP_Y / 2 - 0.25, pipeZ);
+            lCap.castShadow = true;
+            lCap.receiveShadow = true;
+
+            const vWallGeo = new THREE.PlaneGeometry(ROAD_WIDTH * 1.5, 30);
+            const vWallMat = new THREE.MeshBasicMaterial({
+                color: 0x00FFFF,
+                transparent: true,
+                opacity: 0.1,
+                side: THREE.DoubleSide
+            });
+
+            const gapSize = PIPE_WIDTH + 2;
+            const leftW = new THREE.Mesh(vWallGeo, vWallMat);
+            leftW.position.set(randomX - (gapSize / 2 + ROAD_WIDTH * 0.75), 0, pipeZ);
+
+            const rightW = new THREE.Mesh(vWallGeo, vWallMat);
+            rightW.position.set(randomX + (gapSize / 2 + ROAD_WIDTH * 0.75), 0, pipeZ);
+
+            scene.add(upperPipe);
+            scene.add(lowerPipe);
+            scene.add(uCap);
+            scene.add(lCap);
+            scene.add(leftW);
+            scene.add(rightW);
+
+            pipes.push({
+                upper: upperPipe,
+                lower: lowerPipe,
+                uCap: uCap,
+                lCap: lCap,
+                leftW: leftW,
+                rightW: rightW,
+                x: randomX,
+                yCenter: randomY,
+                passed: false,
+                z: pipeZ
+            });
+            lastPipeZ = pipeZ;
+        }
+
+        function updateGame(dt) {
+            if (!gameActive) return;
+
+            // dt saniye cinsinden (örn: 0.0167 = 16.7ms)
+            const dtSeconds = dt / 1000;
+
+            // Fizik güncellemeleri - FLAPPY BIRD TARZI
+            bird.position.z -= GAME_SPEED * dtSeconds;
+
+            // Yerçekimi her zaman aktif
+            birdVelocityY -= GRAVITY * dtSeconds;
+
+            // Maksimum düşüş hızını sınırla
+            if (birdVelocityY < MAX_FALL_SPEED) {
+                birdVelocityY = MAX_FALL_SPEED;
+            }
+
+            bird.position.y += birdVelocityY * dtSeconds;
+
+            // Fizik güncellemeleri - FLAPPY BIRD TARZI
+            bird.position.z -= GAME_SPEED * dtSeconds;
+
+            // Yerçekimi her zaman aktif
+            birdVelocityY -= GRAVITY * dtSeconds;
+
+            // Maksimum düşüş hızını sınırla
+            if (birdVelocityY < MAX_FALL_SPEED) {
+                birdVelocityY = MAX_FALL_SPEED;
+            }
+
+            bird.position.y += birdVelocityY * dtSeconds;
+
+            const currentRoadX = getRoadX(bird.position.z);
+
+            // --- HAREKET MANTIĞI GÜNCELLEMESİ ---
+            // Eski yöntem: Mutlak X pozisyonunu yumuşatıyorduk, bu da yol döndüğünde gecikmeye (lag) sebep oluyordu.
+            // Yeni yöntem: Sadece "yola göre ofseti" yumuşatıyoruz. Yolun dönüşünü anlık olarak ekliyoruz.
+
+            // Hedef ofsetimiz (targetBirdX zaten yola göre ofset olarak hesaplanıyor)
+            const targetOffset = targetBirdX;
+
+            // Yumuşak geçiş (frame-independent)
+            const smoothFactor = 1 - Math.pow(0.85, dtSeconds * 60);
+
+            // Ofseti yumuşat
+            currentBirdOffset += (targetOffset - currentBirdOffset) * smoothFactor;
+
+            // Kuşun gerçek pozisyonu = Yolun Merkezi + Yumuşatılmış Ofset
+            bird.position.x = currentRoadX + currentBirdOffset;
+
+            const minX = currentRoadX - PLAY_WIDTH;
+            const maxX = currentRoadX + PLAY_WIDTH;
+            if (bird.position.x > maxX) {
+                bird.position.x = maxX;
+                currentBirdOffset = maxX - currentRoadX; // Ofseti de sınırla
+            }
+            if (bird.position.x < minX) {
+                bird.position.x = minX;
+                currentBirdOffset = minX - currentRoadX; // Ofseti de sınırla
+            }
+
+            const nextRoadX = getRoadX(bird.position.z - 1);
+            const roadSlope = nextRoadX - currentRoadX;
+
+            // Dönüş efektleri
+            bird.rotation.z = (targetOffset - currentBirdOffset) * 0.3 - roadSlope * 0.5;
+            bird.rotation.y = Math.atan2(roadSlope, -1);
+            // Flappy Bird tarzı rotasyon: yukarı bakarken pozitif, düşerken negatif
+            bird.rotation.x = Math.max(-0.5, Math.min(0.5, birdVelocityY * 0.08));
+
+            // Kamera takibi
+            const cameraOffsetZ = 15;
+            const cameraTargetZ = bird.position.z + cameraOffsetZ;
+            camera.position.z = cameraTargetZ;
+
+            const roadXAtCamera = getRoadX(cameraTargetZ);
+
+            // Kamera da yolu anlık takip etmeli, sadece kuşun sapmasını yumuşak takip etmeli
+            // Hedef kamera ofseti (yola göre)
+            const targetCamOffset = currentBirdOffset * 0.3;
+
+            const cameraSmoothFactor = 1 - Math.pow(0.95, dtSeconds * 60);
+            cameraCurrentOffset += (targetCamOffset - cameraCurrentOffset) * cameraSmoothFactor;
+
+            camera.position.x = roadXAtCamera + cameraCurrentOffset;
+
+            const lookAtZ = bird.position.z - 10;
+            const targetLookAtX = getRoadX(lookAtZ);
+
+            // LookAt de yolu takip etmeli
+            camera.lookAt(targetLookAtX, 0, lookAtZ);
+
+            if (bird.position.y < -2) gameOver();
+
+            if (lastRoadZ > bird.position.z - 100) {
+                createRoadSegment();
+            }
+
+            if (bird.position.z < lastPipeZ + PIPE_DISTANCE * 2) createPipe();
+
+            for (let i = pipes.length - 1; i >= 0; i--) {
+                const p = pipes[i];
+                if (!p.passed && p.z > bird.position.z) {
+                    score++;
+                    document.getElementById('scoreVal').innerText = score;
+                    p.passed = true;
+                }
+
+                if (Math.abs(p.z - bird.position.z) < 1.0) {
+                    const corridorHalfWidth = PIPE_WIDTH / 2 + 0.6;
+                    const dx = Math.abs(bird.position.x - p.x);
+
+                    if (dx > corridorHalfWidth) {
+                        gameOver();
+                    } else {
+                        const gapTop = p.yCenter + PIPE_GAP_Y / 2;
+                        const gapBottom = p.yCenter - PIPE_GAP_Y / 2;
+                        const hitY = (bird.position.y + 0.4 > gapTop) || (bird.position.y - 0.4 < gapBottom);
+                        if (hitY) gameOver();
+                    }
+                }
+
+                if (p.z > camera.position.z + 10) {
+                    scene.remove(p.upper);
+                    scene.remove(p.lower);
+                    scene.remove(p.uCap);
+                    scene.remove(p.lCap);
+                    scene.remove(p.leftW);
+                    scene.remove(p.rightW);
+                    pipes.splice(i, 1);
+                }
+            }
+        }
+
+        function jump() {
+            if (gameActive) {
+                // Flappy Bird tarzı: Her tıklamada sabit yukarı hız
+                birdVelocityY = JUMP_STRENGTH;
+            } else if (document.getElementById('gameOverScreen').style.display === 'block') {
+                resetGame();
+            } else {
+                // Oyun başlatma
+                gameActive = true;
+                birdVelocityY = JUMP_STRENGTH;
+            }
+        }
+
+        function gameOver() {
+            gameActive = false;
+            document.getElementById('gameOverScreen').style.display = 'block';
+            document.getElementById('finalScore').innerText = score;
+        }
+
+        window.resetGame = function () {
+            pipes.forEach(p => {
+                scene.remove(p.upper);
+                scene.remove(p.lower);
+                scene.remove(p.uCap);
+                scene.remove(p.lCap);
+                scene.remove(p.leftW);
+                scene.remove(p.rightW);
+            });
+            pipes = [];
+            lastPipeZ = -20;
+
+            roadSegments.forEach(r => {
+                scene.remove(r.mesh);
+                scene.remove(r.left);
+                scene.remove(r.right);
+            });
+            roadSegments = [];
+            lastRoadZ = 0;
+            for (let i = 0; i < 50; i++) createRoadSegment();
+
+            bird.position.set(0, 0, 0);
+            birdVelocityY = 0;
+            targetBirdX = 0;
+            score = 0;
+            currentBirdOffset = 0;
+            cameraCurrentOffset = 0;
+            document.getElementById('scoreVal').innerText = '0';
+            document.getElementById('gameOverScreen').style.display = 'none';
+            camera.position.set(0, 4, 15);
+            createPipe();
+            createPipe();
+            createPipe();
+            gameActive = false;
+        }
+
+        function setupMediaPipe() {
+            const videoElement = document.getElementById('webcam');
+            const canvasElement = document.getElementById('output_canvas');
+            const canvasCtx = canvasElement.getContext('2d');
+
+            const hands = new Hands({
+                locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+            });
+            hands.setOptions({
+                maxNumHands: 1,
+                modelComplexity: 1,
+                minDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5
+            });
+
+            hands.onResults((results) => {
+                canvasCtx.save();
+                canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+                canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+                if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                    const landmarks = results.multiHandLandmarks[0];
+                    drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, {
+                        color: '#00FF00',
+                        lineWidth: 2
+                    });
+                    drawLandmarks(canvasCtx, landmarks, {
+                        color: '#FF0000',
+                        lineWidth: 1,
+                        radius: 3
+                    });
+
+                    const cursorX = (1 - landmarks[8].x) * canvasElement.width;
+                    const cursorY = landmarks[8].y * canvasElement.height;
+
+                    const dist = Math.sqrt(
+                        Math.pow(landmarks[4].x - landmarks[8].x, 2) +
+                        Math.pow(landmarks[4].y - landmarks[8].y, 2)
+                    );
+                    const isCurrentPinch = dist < PINCH_THRESHOLD; // Optimize edildi
+
+                    canvasCtx.beginPath();
+                    if (isCurrentPinch) {
+                        canvasCtx.arc(cursorX, cursorY, 15, 0, 2 * Math.PI);
+                        canvasCtx.fillStyle = "#00FF00";
+                        canvasCtx.fill();
+                        canvasCtx.lineWidth = 3;
+                        canvasCtx.strokeStyle = "white";
+                        canvasCtx.stroke();
+
+                        const now = Date.now();
+                        if (!isPinching && now - lastPinchTime > PINCH_COOLDOWN) {
+                            jump();
+                            lastPinchTime = now;
+                            isPinching = true;
+                        }
+                    } else {
+                        canvasCtx.arc(cursorX, cursorY, 8, 0, 2 * Math.PI);
+                        canvasCtx.strokeStyle = "white";
+                        canvasCtx.lineWidth = 3;
+                        canvasCtx.stroke();
+                        isPinching = false;
+                    }
+
+                    const normalizedX = cursorX / canvasElement.width;
+                    targetBirdX = (normalizedX - 0.5) * (PLAY_WIDTH * 2);
+                }
+                canvasCtx.restore();
+            });
+
+            const cameraUtils = new Camera(videoElement, {
+                onFrame: async () => {
+                    await hands.send({ image: videoElement });
+                },
+                width: CAMERA_WIDTH,
+                height: CAMERA_HEIGHT
+            });
+            cameraUtils.start();
+        }
+
+        function animate(currentTime) {
+            requestAnimationFrame(animate);
+
+            // Delta time hesaplama
+            deltaTime = currentTime - lastTime;
+            lastTime = currentTime;
+
+            // FPS hesaplama
+            frameCount++;
+            fpsTime += deltaTime;
+            if (fpsTime >= 1000) {
+                currentFPS = Math.round((frameCount * 1000) / fpsTime);
+                document.getElementById('fpsVal').innerText = currentFPS;
+                frameCount = 0;
+                fpsTime = 0;
+            }
+
+            // Oyunu delta time ile güncelle
+            updateGame(deltaTime);
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+
+</html>
