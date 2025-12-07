@@ -103,6 +103,39 @@
             font-size: 14px;
             z-index: 20;
         }
+
+        /* Global Cursor */
+        #game-cursor {
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #00FFFF;
+            border-radius: 50%;
+            pointer-events: none;
+            z-index: 100;
+            box-shadow: 0 0 10px #00FFFF, inset 0 0 10px #00FFFF;
+            transform: translate(-50%, -50%);
+            display: none;
+            /* İlk başta gizli */
+        }
+
+        /* Power-Up Status */
+        /* UI Status Display */
+        #status-display {
+            position: absolute;
+            top: 20%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #FFD700;
+            font-size: 48px;
+            font-weight: 900;
+            text-shadow: 0 0 20px #FF0000, 2px 2px 0px #000;
+            display: none;
+            z-index: 25;
+            text-align: center;
+            font-family: 'Impact', sans-serif;
+            letter-spacing: 2px;
+        }
     </style>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -126,6 +159,9 @@
     </div>
 
     <div id="fps">FPS: <span id="fpsVal">60</span></div>
+    <div id="game-cursor"></div>
+    <div id="game-cursor"></div>
+    <div id="status-display"></div>
 
     <div id="gameOverScreen">
         <h1 style="font-size: 60px; margin: 0; color: #e74c3c;">KAZA!</h1>
@@ -172,14 +208,22 @@
         const JUMP_STRENGTH = 12.0; // birim/saniye - Net zıplama
         const GAME_SPEED = 6.0; // birim/saniye
         const MAX_FALL_SPEED = -10.0; // Maksimum düşüş hızı sınırı
-        const PIPE_DISTANCE = 22;
+        const PIPE_DISTANCE = 50;
 
         // Harita Sınırları
         const ROAD_WIDTH = 28;
-        const PLAY_WIDTH = 10.0;
+        let PLAY_WIDTH = 14.0; // const yerine let yaptık ki değişebilsin
+
+        // --- POWER-UP SİSTEMİ ---
+        let powerUps = [];
+        let shieldActive = false;
+        let shieldTimer = 0;
+        let wallBreakerActive = false;
+        let wallBreakerTimer = 0;
+        let originalPlayWidth = 14.0;
         const WALL_HEIGHT = 15;
-        const PIPE_WIDTH = 2.5;
-        const PIPE_GAP_Y = 6;
+        const PIPE_WIDTH = 6;
+        const PIPE_GAP_Y = 9;
 
         // El Takibi - FLAPPY BIRD TARZI
         let isPinching = false;
@@ -418,11 +462,71 @@
                 leftW: leftW,
                 rightW: rightW,
                 x: randomX,
+                offset: randomOffset,
                 yCenter: randomY,
                 passed: false,
                 z: pipeZ
             });
             lastPipeZ = pipeZ;
+        }
+
+        function createPowerUp() {
+            // Power-Up'ı borudan biraz daha ileri koy
+            const itemZ = lastPipeZ - 30; // 30 birim ileri
+            const roadX = getRoadX(itemZ);
+
+            // Yolun ortalarında spawn olsun
+            const limitX = 8.0;
+            const randomOffset = (Math.random() * (limitX * 2)) - limitX;
+            const itemX = roadX + randomOffset;
+            const itemY = Math.random() * 5 + 3;
+
+            const type = Math.random() < 0.5 ? 'shield' : 'wallBreaker';
+            let mesh;
+
+            if (type === 'shield') {
+                // SHIELD: Mavi, Transparan Küre
+                const geo = new THREE.SphereGeometry(1.5, 32, 32);
+                const mat = new THREE.MeshPhongMaterial({
+                    color: 0x00BFFF,
+                    emissive: 0x0000AA,
+                    shininess: 100,
+                    transparent: true,
+                    opacity: 0.9
+                });
+                mesh = new THREE.Mesh(geo, mat);
+            } else {
+                // WALL BREAKER: Kırmızı, Parlak Küp
+                const geo = new THREE.BoxGeometry(2.5, 2.5, 2.5);
+                const mat = new THREE.MeshPhongMaterial({
+                    color: 0xFF0000,
+                    emissive: 0xFF4500,
+                    shininess: 100
+                });
+                mesh = new THREE.Mesh(geo, mat);
+            }
+
+            mesh.position.set(itemX, itemY, itemZ);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            // Dönüş için başlangıç rotasyonu
+            mesh.rotation.y = Math.random() * Math.PI;
+            mesh.rotation.z = Math.random() * Math.PI;
+
+            scene.add(mesh);
+
+            powerUps.push({
+                mesh: mesh,
+                type: type,
+                x: itemX,
+                z: itemZ,
+                passed: false
+            });
+
+            // --- DYNAMIC PACING ---
+            // Power-Up spawn olduğunda bir sonraki boruyu çok daha uzağa at!
+            // Böylece oyuncu power-up'ı aldıktan sonra "nefes alma" anı yaşar.
+            lastPipeZ = itemZ - 40; // 40 birim "SAFE ZONE"
         }
 
         function updateGame(dt) {
@@ -475,25 +579,43 @@
             // Kuşun gerçek pozisyonu = Yolun Merkezi + Yumuşatılmış Ofset
             bird.position.x = currentRoadX + currentBirdOffset;
 
-            const minX = currentRoadX - PLAY_WIDTH;
-            const maxX = currentRoadX + PLAY_WIDTH;
+            // --- MOVEMENT CLAMPING / INPUT SATURATION ---
+            // Eğer Wall Breaker aktif DEĞİLSE, kuşu yolda tut.
+            // Wall Breaker aktifse, çok daha geniş bir alana (±22) izin ver.
+            let clampWidth;
+            if (wallBreakerActive) {
+                clampWidth = 22.0; // Wall breaker ile dışarı çıkabilir
+            } else {
+                clampWidth = originalPlayWidth; // Normal sınırlar (14.0)
+            }
+
+            const minX = currentRoadX - clampWidth;
+            const maxX = currentRoadX + clampWidth;
+
             if (bird.position.x > maxX) {
                 bird.position.x = maxX;
-                currentBirdOffset = maxX - currentRoadX; // Ofseti de sınırla
+                currentBirdOffset = maxX - currentRoadX;
             }
             if (bird.position.x < minX) {
                 bird.position.x = minX;
-                currentBirdOffset = minX - currentRoadX; // Ofseti de sınırla
+                currentBirdOffset = minX - currentRoadX;
             }
 
             const nextRoadX = getRoadX(bird.position.z - 1);
             const roadSlope = nextRoadX - currentRoadX;
 
             // Dönüş efektleri
-            bird.rotation.z = (targetOffset - currentBirdOffset) * 0.3 - roadSlope * 0.5;
-            bird.rotation.y = Math.atan2(roadSlope, -1);
+            // Dönüş efektleri - Hedef Değerler
+            const targetRotZ = (targetOffset - currentBirdOffset) * 0.3 - roadSlope * 0.5;
+            const targetRotY = Math.atan2(roadSlope, -1);
             // Flappy Bird tarzı rotasyon: yukarı bakarken pozitif, düşerken negatif
-            bird.rotation.x = Math.max(-0.5, Math.min(0.5, birdVelocityY * 0.08));
+            const targetRotX = Math.max(-0.5, Math.min(0.5, birdVelocityY * 0.08));
+
+            // Yumuşak geçiş (Lerp)
+            const rotSmooth = 0.15;
+            bird.rotation.x += (targetRotX - bird.rotation.x) * rotSmooth;
+            bird.rotation.y += (targetRotY - bird.rotation.y) * rotSmooth;
+            bird.rotation.z += (targetRotZ - bird.rotation.z) * rotSmooth;
 
             // Kamera takibi
             const cameraOffsetZ = 15;
@@ -523,7 +645,120 @@
                 createRoadSegment();
             }
 
-            if (bird.position.z < lastPipeZ + PIPE_DISTANCE * 2) createPipe();
+            // --- SPAWN MANTIĞI ---
+            if (bird.position.z < lastPipeZ + PIPE_DISTANCE * 2) {
+                // Daha nadir power-up (%15 şans)
+                if (Math.random() < 0.15) {
+                    createPowerUp();
+                } else {
+                    createPipe();
+                }
+            }
+
+            // --- POWER-UP LOOP ---
+            const statusEl = document.getElementById('status-display');
+            let statusText = "";
+
+            // Efekt Süreleri Kontrolü
+            if (shieldActive) {
+                shieldTimer -= dtSeconds;
+                statusText = "SHIELD: " + shieldTimer.toFixed(1) + "s";
+
+                // Bird etrafında kalkan efekti var mı? Yoksa ekle
+                if (!bird.getObjectByName('shieldSphere')) {
+                    const sGeo = new THREE.SphereGeometry(1.2, 16, 16);
+                    const sMat = new THREE.MeshBasicMaterial({
+                        color: 0x00FFFF,
+                        transparent: true,
+                        opacity: 0.3,
+                        side: THREE.BackSide // İçini de render etmesin, sadece dışı
+                    });
+                    const sMesh = new THREE.Mesh(sGeo, sMat);
+                    sMesh.name = 'shieldSphere';
+                    bird.add(sMesh);
+                }
+
+                if (shieldTimer <= 0) {
+                    shieldActive = false;
+                    // Kalkanı kaldır
+                    const s = bird.getObjectByName('shieldSphere');
+                    if (s) bird.remove(s);
+                }
+            } else {
+                // Kalkan yoksa ve mesh duruyorsa temizle (reset durumları için)
+                const s = bird.getObjectByName('shieldSphere');
+                if (s) bird.remove(s);
+            }
+
+            if (wallBreakerActive) {
+                wallBreakerTimer -= dtSeconds;
+                if (!shieldActive) statusText = "NO WALLS: " + wallBreakerTimer.toFixed(1) + "s";
+                else statusText += "<br>NO WALLS: " + wallBreakerTimer.toFixed(1) + "s";
+
+                // Duvarları gizle
+                roadSegments.forEach(seg => {
+                    seg.left.visible = false;
+                    seg.right.visible = false;
+                });
+                pipes.forEach(p => {
+                    p.leftW.visible = false;
+                    p.rightW.visible = false;
+                });
+
+                if (wallBreakerTimer <= 0) {
+                    wallBreakerActive = false;
+                    PLAY_WIDTH = originalPlayWidth;
+                    // Duvarları geri getir
+                    roadSegments.forEach(seg => {
+                        seg.left.visible = true;
+                        seg.right.visible = true;
+                    });
+                    pipes.forEach(p => {
+                        p.leftW.visible = true;
+                        p.rightW.visible = true;
+                    });
+                }
+            }
+
+            if (statusText !== "") {
+                statusEl.innerHTML = statusText;
+                statusEl.style.display = "block";
+            } else {
+                statusEl.style.display = "none";
+            }
+
+            // Power-Up Hareketi ve Çarpışma
+            for (let i = powerUps.length - 1; i >= 0; i--) {
+                const pu = powerUps[i];
+
+                // Rotasyon efekti
+                pu.mesh.rotation.y += dtSeconds * 2;
+                pu.mesh.rotation.x += dtSeconds;
+
+                // Çarpışma (Basit mesafe kontrolü)
+                const dist = bird.position.distanceTo(pu.mesh.position);
+                if (dist < 3.0) {
+                    // ALINDI!
+                    if (pu.type === 'shield') {
+                        shieldActive = true;
+                        shieldTimer = 5.0;
+                    } else if (pu.type === 'wallBreaker') {
+                        wallBreakerActive = true;
+                        wallBreakerTimer = 4.0;
+                        PLAY_WIDTH = 20.0;
+                    }
+
+                    scene.remove(pu.mesh);
+                    powerUps.splice(i, 1);
+                    continue;
+                }
+
+                if (pu.z > camera.position.z + 10) {
+                    scene.remove(pu.mesh);
+                    powerUps.splice(i, 1);
+                }
+            }
+
 
             for (let i = pipes.length - 1; i >= 0; i--) {
                 const p = pipes[i];
@@ -534,16 +769,19 @@
                 }
 
                 if (Math.abs(p.z - bird.position.z) < 1.0) {
-                    const corridorHalfWidth = PIPE_WIDTH / 2 + 0.6;
-                    const dx = Math.abs(bird.position.x - p.x);
+                    // EĞER SHIELD RAKTİFSE ÇARPIŞMAYI YOK SAY!
+                    if (!shieldActive) {
+                        const corridorHalfWidth = PIPE_WIDTH / 2 + 0.6;
+                        const dx = Math.abs(currentBirdOffset - p.offset);
 
-                    if (dx > corridorHalfWidth) {
-                        gameOver();
-                    } else {
-                        const gapTop = p.yCenter + PIPE_GAP_Y / 2;
-                        const gapBottom = p.yCenter - PIPE_GAP_Y / 2;
-                        const hitY = (bird.position.y + 0.4 > gapTop) || (bird.position.y - 0.4 < gapBottom);
-                        if (hitY) gameOver();
+                        if (dx > corridorHalfWidth) {
+                            gameOver();
+                        } else {
+                            const gapTop = p.yCenter + PIPE_GAP_Y / 2;
+                            const gapBottom = p.yCenter - PIPE_GAP_Y / 2;
+                            const hitY = (bird.position.y + 0.4 > gapTop) || (bird.position.y - 0.4 < gapBottom);
+                            if (hitY) gameOver();
+                        }
                     }
                 }
 
@@ -589,6 +827,17 @@
             });
             pipes = [];
             lastPipeZ = -20;
+
+            // Power-Up Temizliği
+            powerUps.forEach(pu => scene.remove(pu.mesh));
+            powerUps = [];
+            shieldActive = false;
+            wallBreakerActive = false;
+            PLAY_WIDTH = originalPlayWidth;
+            document.getElementById('status-display').style.display = 'none';
+            // Varsa Shield Visual'ı temizle
+            const s = bird.getObjectByName('shieldSphere');
+            if (s) bird.remove(s);
 
             roadSegments.forEach(r => {
                 scene.remove(r.mesh);
@@ -636,10 +885,7 @@
 
                 if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
                     const landmarks = results.multiHandLandmarks[0];
-                    drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, {
-                        color: '#00FF00',
-                        lineWidth: 2
-                    });
+                    // Çizim fonksiyonları (Sadece keypoints)
                     drawLandmarks(canvasCtx, landmarks, {
                         color: '#FF0000',
                         lineWidth: 1,
@@ -653,17 +899,10 @@
                         Math.pow(landmarks[4].x - landmarks[8].x, 2) +
                         Math.pow(landmarks[4].y - landmarks[8].y, 2)
                     );
-                    const isCurrentPinch = dist < PINCH_THRESHOLD; // Optimize edildi
+                    const isCurrentPinch = dist < PINCH_THRESHOLD;
 
-                    canvasCtx.beginPath();
+                    // Canvas çizimi kaldırıldı, sadece mantık
                     if (isCurrentPinch) {
-                        canvasCtx.arc(cursorX, cursorY, 15, 0, 2 * Math.PI);
-                        canvasCtx.fillStyle = "#00FF00";
-                        canvasCtx.fill();
-                        canvasCtx.lineWidth = 3;
-                        canvasCtx.strokeStyle = "white";
-                        canvasCtx.stroke();
-
                         const now = Date.now();
                         if (!isPinching && now - lastPinchTime > PINCH_COOLDOWN) {
                             jump();
@@ -671,15 +910,41 @@
                             isPinching = true;
                         }
                     } else {
-                        canvasCtx.arc(cursorX, cursorY, 8, 0, 2 * Math.PI);
-                        canvasCtx.strokeStyle = "white";
-                        canvasCtx.lineWidth = 3;
-                        canvasCtx.stroke();
                         isPinching = false;
                     }
 
                     const normalizedX = cursorX / canvasElement.width;
-                    targetBirdX = (normalizedX - 0.5) * (PLAY_WIDTH * 2);
+
+                    // --- INPUT SATURATION FIX ---
+                    // Normalde (normalizedX - 0.5) * (PLAY_WIDTH * 2) yapıyorduk.
+                    // Şimdi inputu "overdrive" yapmak için daha geniş bir çarpan kullanıyoruz.
+                    // 14 birim yol için, input aralığını 20 birim gibi hesaplıyoruz.
+                    // Bu sayede el kenara yaklaşmadan kuş kenara yapışıyor (snap feel).
+                    const INPUT_RANGE = 22.0;
+                    targetBirdX = (normalizedX - 0.5) * (INPUT_RANGE * 2);
+
+                    // Not: targetBirdX burada clamp'lanmıyor! updateGame içinde clamp'lanacak.
+                    // Bu sayede "target" dışarıda olsa bile kuş sınırda kalır, bu da hızlı dönüş sağlar.
+
+                    // --- Cursor Güncelleme ---
+                    // El koordinatlarını (1 - landmarks[8].x) pencere boyutuna uyarla
+                    const screenX = (1 - landmarks[8].x) * window.innerWidth;
+                    const screenY = landmarks[8].y * window.innerHeight;
+
+                    const cursorEl = document.getElementById('game-cursor');
+                    cursorEl.style.display = 'block';
+                    cursorEl.style.left = screenX + 'px';
+                    cursorEl.style.top = screenY + 'px';
+
+                    if (isCurrentPinch) {
+                        cursorEl.style.backgroundColor = '#00FF00';
+                        cursorEl.style.borderColor = '#00FF00';
+                        cursorEl.style.boxShadow = '0 0 15px #00FF00';
+                    } else {
+                        cursorEl.style.backgroundColor = 'transparent';
+                        cursorEl.style.borderColor = '#00FFFF';
+                        cursorEl.style.boxShadow = '0 0 10px #00FFFF, inset 0 0 10px #00FFFF';
+                    }
                 }
                 canvasCtx.restore();
             });
